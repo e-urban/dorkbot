@@ -40,7 +40,8 @@ def main():
             or args.add_target or args.delete_target \
             or args.list_blacklist or args.flush_blacklist \
             or args.add_blacklist_item or args.delete_blacklist_item \
-            or args.flush_fingerprints or args.list_unscanned:
+            or args.flush_fingerprints or args.list_unscanned \
+            or args.mark_all_unscanned:
 
         db = TargetDatabase(args.database)
         if args.blacklist:
@@ -62,6 +63,7 @@ def main():
             for url in db.get_urls(): print(url)
         if args.list_unscanned:
             for url in db.get_urls(unscanned_only=True): print(url)
+        if args.mark_all_unscanned: db.mark_all_unscanned()
         db.close()
 
         if args.add_blacklist_item: blacklist.add(args.add_blacklist_item)
@@ -170,6 +172,8 @@ def get_args_parser():
                          help="Delete a url from the target database")
     targets.add_argument("--flush-targets", action="store_true", \
                          help="Delete all targets")
+    targets.add_argument("--mark-all-unscanned", action="store_true", \
+                         help="Mark all targets as unscanned in database")
 
     indexing = parser.add_argument_group('indexing')
     indexing.add_argument("-i", "--indexer", \
@@ -489,6 +493,18 @@ class TargetDatabase:
                 else:
                     logging.error("Failed to mark target as scanned - %s", str(e))
                     sys.exit(1)
+
+    def mark_all_unscanned(self):
+        try:
+            with self.db, closing(self.db.cursor()) as c:
+                c.execute("UPDATE targets SET scanned = 0")
+        except self.module.Error as e:
+            if "connection already closed" in str(e) or "server closed the connection unexpectedly" in str(e):
+                logging.warning("Failed to mark targets as not scanned (retrying) - %s", str(e))
+                self.connect()
+            else:
+                logging.error("Failed to mark targets as not scanned - %s", str(e))
+                sys.exit(1)
 
     def flush_fingerprints(self):
         logging.info("Flushing fingerprints")

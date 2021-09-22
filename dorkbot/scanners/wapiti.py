@@ -17,13 +17,18 @@ def run(options, target):
     else:
         wapiti_path = default_wapiti_path
 
+    if "scope" in options:
+        scope = options["scope"]
+    else:
+        scope = "page"
+
     report = os.path.join(tempfile.gettempdir(), target.get_hash() + ".json")
 
     cmd = [os.path.join(wapiti_path, "wapiti")]
-    if platform.system() is "Windows":
+    if platform.system() == "Windows":
         cmd.insert(0, sys.executable)
     cmd += ["--url", target.url]
-    cmd += ["--scope", "page"]
+    cmd += ["--scope", scope]
     cmd += ["--flush-session"]
     cmd += ["--format", "json"]
     cmd += ["--output", report]
