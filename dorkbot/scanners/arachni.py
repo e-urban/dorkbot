@@ -20,7 +20,7 @@ def run(options, target):
     report = os.path.join(tempfile.gettempdir(), target.get_hash() + ".afr")
 
     scan_cmd = [os.path.join(arachni_path, "arachni")]
-    if platform.system() is "Windows":
+    if platform.system() == "Windows":
         scan_cmd[0] = scan_cmd[0] + ".bat"
     scan_cmd += ["--report-save-path", report]
     scan_cmd += ["--output-only-positives"]
@@ -31,7 +31,7 @@ def run(options, target):
     scan_cmd += [target.url]
 
     report_cmd = [os.path.join(arachni_path, "arachni_reporter")]
-    if platform.system() is "Windows":
+    if platform.system() == "Windows":
         report_cmd[0] = report_cmd[0] + ".bat"
     report_cmd += ["--reporter", "json:outfile=" + report + ".json"]
     report_cmd += [report]
@@ -57,13 +57,15 @@ def run(options, target):
         for issue in data["issues"]:
             vuln = {}
             vuln["vulnerability"] = issue["check"]["shortname"]
-            vuln["url"] = issue["referring_page"]["dom"]["url"]
+            vuln["url"] = issue["vector"]["url"]
             vuln["parameter"] = issue["vector"]["affected_input_name"]
-            if "method" in issue["vector"]:
-                vuln["method"] = issue["vector"]["method"]
-            else:
-                vuln["method"] = ""
-            vuln["poc"] = issue["page"]["dom"]["url"]
+            if vuln["parameter"] is None:
+                vuln["parameter"] = ""
+            vuln["method"] = issue["request"]["method"]
+            vuln["poc"] = issue["response"]["url"]
+            vuln["poc_data"] = issue["request"]["effective_body"]
+            if vuln["poc_data"] is None:
+                vuln["poc_data"] = ""
             vulns.append(vuln)
 
     os.remove(report)

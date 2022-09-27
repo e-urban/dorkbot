@@ -57,12 +57,10 @@ def main():
         if args.flush_targets: db.flush_targets()
         if args.flush_blacklist: blacklist.flush()
         if args.flush_fingerprints: db.flush_fingerprints()
-        if args.add_target: db.add_target(args.add_target)
+        if args.add_target: db.add_target(args.add_target, indexer_options.get("source"))
         if args.delete_target: db.delete_target(args.delete_target)
-        if args.list_targets:
-            for url in db.get_urls(): print(url)
-        if args.list_unscanned:
-            for url in db.get_urls(unscanned_only=True): print(url)
+        if args.list_targets or args.list_unscanned:
+            for url in db.get_urls(unscanned_only=indexer_options.get("list_unscanned"), source=indexer_options.get("source")): print(url)
         if args.mark_all_unscanned: db.mark_all_unscanned()
         db.close()
 
@@ -213,43 +211,28 @@ def index(db, blacklist, indexer, args, options):
     indexer_options = ",".join(["%s=%s" % (key, val) for key, val in options.items()])
     logging.info("Indexing: %s %s", indexer_name, indexer_options)
     options["directory"] = args.directory
-    urls = indexer.run(options)
+    urls, module_source = indexer.run(options)
+    source = options.get("source", module_source)
 
     targets = []
     for url in urls:
         if not blacklist.match(Target(url)): targets.append(url)
 
     db.connect()
-    db.add_targets(targets)
+    db.add_targets(targets, source)
     db.close()
 
 
 def prune(db, blacklist, args, options):
-    fingerprints = set()
+    if "random" in options:
+        randomize = True
+    else:
+        randomize = False
 
     logging.info("Pruning database")
+
     db.connect()
-    urls = db.get_urls()
-
-    if "random" in options:
-        random.shuffle(urls)
-
-    for url in urls:
-        target = Target(url)
-
-        fingerprint = generate_fingerprint(target)
-        if fingerprint in fingerprints or db.get_scanned(fingerprint):
-            logging.debug("Marking scanned (matches fingerprint of another target): %s", target.url)
-            db.mark_scanned(target.url)
-            continue
-
-        if blacklist.match(target):
-            logging.debug("Deleting (matches blacklist pattern): %s", target.url)
-            db.delete_target(target.url)
-            continue
-
-        fingerprints.add(fingerprint)
-
+    db.prune(blacklist, randomize)
     db.close()
 
 
@@ -302,7 +285,7 @@ def generate_fingerprint(target):
         split = param.split("=", 1)
         if len(split) == 2 and split[1]:
             params.append(split[0])
-    fingerprint = "|".join((netloc, depth, page, ",".join(sorted(params))))
+    fingerprint = "|".join((netloc, depth, ",".join(sorted(params))))
     return generate_hash(fingerprint)
 
 
@@ -373,7 +356,7 @@ class TargetDatabase:
         self.connect()
         try:
             with self.db, closing(self.db.cursor()) as c:
-                c.execute("CREATE TABLE IF NOT EXISTS targets (url VARCHAR PRIMARY KEY, scanned INTEGER DEFAULT 0)")
+                c.execute("CREATE TABLE IF NOT EXISTS targets (url VARCHAR PRIMARY KEY, source VARCHAR, scanned INTEGER DEFAULT 0)")
                 c.execute("CREATE TABLE IF NOT EXISTS fingerprints (fingerprint VARCHAR PRIMARY KEY)")
                 c.execute("CREATE TABLE IF NOT EXISTS blacklist (item VARCHAR PRIMARY KEY)")
         except self.module.Error as e:
@@ -390,15 +373,29 @@ class TargetDatabase:
     def close(self):
         self.db.close()
 
-    def get_urls(self, unscanned_only=False):
-        sql = "SELECT url FROM targets"
+    def get_urls(self, unscanned_only=False, source=False):
+        fields = "url"
+        if source is True:
+            fields += ",source"
+
+        where = None
         if unscanned_only:
-            sql += " WHERE scanned != 1"
+            where = " WHERE scanned != 1"
+
+        sql = f"SELECT {fields} FROM targets"
 
         try:
             with self.db, closing(self.db.cursor()) as c:
-                c.execute(sql)
-                urls = [row[0] for row in c.fetchall()]
+                if source and source is not True:
+                    if where is None:
+                        sql += " WHERE "
+                    else:
+                        sql += " AND "
+                    sql += "source = %s" % self.param
+                    c.execute(sql, (source,))
+                else:
+                    c.execute(sql)
+                urls = [" | ".join(row) for row in c.fetchall()]
         except self.module.Error as e:
             logging.error("Failed to get targets - %s", str(e))
             sys.exit(1)
@@ -421,8 +418,8 @@ class TargetDatabase:
                     url = row[0]
                     target = Target(url)
                     fingerprint = generate_fingerprint(target)
-                    self.mark_scanned(url)
-                    if self.get_scanned(fingerprint):
+                    self.mark_scanned(url, c)
+                    if self.get_scanned(fingerprint, c):
                         logging.debug("Skipping (matches fingerprint of previous scan): %s", target.url)
                         continue
                     else:
@@ -434,19 +431,19 @@ class TargetDatabase:
 
         return target
 
-    def add_target(self, url):
+    def add_target(self, url, source=None):
         try:
             with self.db, closing(self.db.cursor()) as c:
-                c.execute("%s INTO targets (url) VALUES (%s) %s" % (self.insert, self.param, self.conflict), (url,))
+                c.execute("%s INTO targets (url, source) VALUES (%s, %s) %s" % (self.insert, self.param, self.param, self.conflict), (url, source))
         except self.module.Error as e:
             logging.error("Failed to add target - %s", str(e))
             sys.exit(1)
 
-    def add_targets(self, urls):
+    def add_targets(self, urls, source=None):
         try:
             with self.db, closing(self.db.cursor()) as c:
-                c.executemany("%s INTO targets (url) VALUES (%s) %s" % (self.insert, self.param, self.conflict),
-                              [(url,) for url in urls])
+                c.executemany("%s INTO targets (url, source) VALUES (%s, %s) %s" % (self.insert, self.param, self.param, self.conflict),
+                              [(url, source) for url in urls])
         except self.module.Error as e:
             logging.error("Failed to add target - %s", str(e))
             sys.exit(1)
@@ -459,13 +456,12 @@ class TargetDatabase:
             logging.error("Failed to delete target - %s", str(e))
             sys.exit(1)
 
-    def get_scanned(self, fingerprint):
+    def get_scanned(self, fingerprint, cursor):
         for i in range(3):
             try:
-                with self.db, closing(self.db.cursor()) as c:
-                    c.execute("SELECT fingerprint FROM fingerprints WHERE fingerprint = (%s)" % self.param, (fingerprint,))
-                    row = c.fetchone()
-                    break
+                cursor.execute("SELECT fingerprint FROM fingerprints WHERE fingerprint = (%s)" % self.param, (fingerprint,))
+                row = cursor.fetchone()
+                break
             except self.module.Error as e:
                 if "connection already closed" in str(e) or "server closed the connection unexpectedly" in str(e):
                     logging.warning("Failed to look up fingerprint (retrying) - %s", str(e))
@@ -480,11 +476,10 @@ class TargetDatabase:
         else:
             return False
 
-    def mark_scanned(self, url):
+    def mark_scanned(self, url, cursor):
         for i in range(3):
             try:
-                with self.db, closing(self.db.cursor()) as c:
-                    c.execute("UPDATE targets SET scanned = 1 WHERE url = %s" % (self.param,), (url,))
+                cursor.execute("UPDATE targets SET scanned = 1 WHERE url = %s" % (self.param,), (url,))
             except self.module.Error as e:
                 if "connection already closed" in str(e) or "server closed the connection unexpectedly" in str(e):
                     logging.warning("Failed to mark target as scanned (retrying) - %s", str(e))
@@ -524,6 +519,31 @@ class TargetDatabase:
         except self.module.Error as e:
             logging.error("Failed to flush targets - %s", str(e))
             sys.exit(1)
+
+    def prune(self, blacklist, randomize=False):
+        fingerprints = set()
+
+        urls = self.get_urls()
+
+        if randomize:
+            random.shuffle(urls)
+
+        for url in urls:
+            target = Target(url)
+
+            fingerprint = generate_fingerprint(target)
+            with self.db, closing(self.db.cursor()) as c:
+                if fingerprint in fingerprints or self.get_scanned(fingerprint, c):
+                    logging.debug("Marking scanned (matches fingerprint of another target): %s", target.url)
+                    self.mark_scanned(target.url, c)
+                    continue
+
+            if blacklist.match(target):
+                logging.debug("Deleting (matches blacklist pattern): %s", target.url)
+                self.delete_target(target.url)
+                continue
+
+            fingerprints.add(fingerprint)
 
 
 class Target:

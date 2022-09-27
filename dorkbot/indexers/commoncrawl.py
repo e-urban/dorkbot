@@ -19,6 +19,8 @@ def run(options):
             logging.error("%s must be set", r)
             sys.exit(1)
 
+    source = __name__.split(".")[-1]
+
     retries = int(options.get("retries", "10"))
     threads = int(options.get("threads", "10"))
     domain = options["domain"]
@@ -36,11 +38,13 @@ def run(options):
         index = get_latest_index(retries)
     num_pages = get_num_pages(index, data, retries)
 
+    source += f",index:{index}"
+
     results = get_results(domain, index, data, num_pages, threads, retries)
     for result in results:
         logging.debug(result)
     logging.info("Fetched %d results", len(results))
-    return results
+    return results, source
 
 
 def get_latest_index(retries):
@@ -109,7 +113,16 @@ def get_page(domain, index, data, retries, page):
             response_str = response_str.read().decode("utf-8")
             response = response_str.splitlines()
         except (HTTPError, IncompleteRead) as e:
-            if i == retries - 1:
+            if type(e).__name__ == "HTTPError" and e.code == 404:
+                response_str = e.read().decode("utf-8")
+                if "message" in response_str:
+                    response = json.loads(response_str)
+                    message = response["message"]
+                else:
+                    message = str(e)
+                logging.warn("Failed to fetch results (page %d) - %s", page, message)
+                return set()
+            elif i == retries - 1:
                 logging.error("Failed to fetch results (page %d, retries exceeded) - %s", page, str(e))
                 sys.exit(1)
             else:
